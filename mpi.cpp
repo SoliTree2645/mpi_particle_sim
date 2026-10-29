@@ -24,8 +24,12 @@ static double y_max;
 // Local spatial cell information
 static std::vector<particle_t> local_particles;
 static std::vector<particle_t> boundary_particles;
-static int is_boundary[4]; // top, right, bottom, left
-static std::vector<int> local_boundary_offsets;
+enum Direction {TOP = 0, TOP_RIGHT, RIGHT, BOTTOM_RIGHT, BOTTOM, BOTTOM_LEFT, LEFT, TOP_LEFT};
+
+static int neighbors[8];
+static int boundary_counts[8];
+static int boundary_offsets[9];
+
 static std::vector<particle_t> ghost_particles;
 
 
@@ -117,6 +121,7 @@ int locate_local_cell(double px, double py)
 
 void local_put_particle_in_cell()
 {
+	local_particle_indices.resize(local_particles.size());
 
 	int local_num_parts = static_cast<int>(local_particles.size());
 	// fill in local_cell_counts
@@ -155,6 +160,51 @@ void local_put_particle_in_cell()
 	}
 }
 
+void check_neighbors()
+{
+	// check four big directions first
+	// check if top is boundary
+	if(proc_row == proc_rows - 1)
+	{
+		neighbors[TOP] = 0;
+	}else
+	{
+		neighbors[TOP] = 1;
+	}
+	
+	// check if right is boundary
+	if(proc_col == proc_cols - 1)
+	{
+		neighbors[RIGHT] = 0;
+	}else
+	{
+		neighbors[RIGHT] = 1;
+	}
+
+	// check if bottom is boundary
+	if(proc_row == 0)
+	{
+		neighbors[BOTTOM] = 0;
+	}else
+	{
+		neighbors[BOTTOM] = 1;
+	}
+
+	// check if left is boundary
+	if(proc_col == 0)
+	{
+		neighbors[LEFT] = 0;
+	}else
+	{
+		neighbors[LEFT] = 1;
+	}
+
+	if(!neighbors[TOP])
+	{
+		neighbors[TOP_RIGHT] = 0;
+		neighbors[TOP_LEFT] = 0;
+	}
+}
 
 
 void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
@@ -180,41 +230,9 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	y_min = domain_height * proc_row;
 	y_max = domain_height * (proc_row + 1);
 	
-	// check if top is boundary
-	if(proc_row == proc_rows - 1)
-	{
-		is_boundary[0] = 0;
-	}else
-	{
-		is_boundary[0] = 1;
-	}
 	
-	// check if right is boundary
-	if(proc_col == proc_cols - 1)
-	{
-		is_boundary[1] = 0;
-	}else
-	{
-		is_boundary[1] = 1;
-	}
-
-	// check if bottom is boundary
-	if(proc_row == 0)
-	{
-		is_boundary[2] = 0;
-	}else
-	{
-		is_boundary[2] = 1;
-	}
-
-	// check if left is boundary
-	if(proc_col == 0)
-	{
-		is_boundary[3] = 0;
-	}else
-	{
-		is_boundary[3] = 1;
-	}
+	check_neighbors();
+	
 
 
 	for (int i = 0; i < num_parts; i++)
@@ -257,10 +275,13 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	local_particle_indices.resize(local_num_parts); 
 
 
+
+
 }
 
 void local_identify_boundary_cells()
 {
+	boundary_particles.clear();
 	// top
 	int top_bd_count = 0;
 	if(is_boundary[0])
@@ -310,7 +331,7 @@ void local_identify_boundary_cells()
 			int end = local_cell_offsets[cell + 1];
 			for(int k = begin; k < end; k++)
 			{
-				int j = local_particles_indices[k];
+				int j = local_particle_indices[k];
 				boundary_particles.push_back(local_particles[j]);
 				bottom_bd_count += 1;
 			}
@@ -330,14 +351,14 @@ void local_identify_boundary_cells()
 			{
 				int j = local_particle_indices[k];
 				boundary_particles.push_back(local_particles[j]);
-				left_bd_count = 0;
+				left_bd_count += 1;
 			}
 
 		}
 	}
 
 	int bd_counts[4] = {top_bd_count, right_bd_count, bottom_bd_count, left_bd_count};
-	local_boundary_offsets.resize(bd_counts[0] + bd_counts[1] + bd_counts[2] + bd_counts[3] + 1);
+	
 	local_boundary_offsets[0] = 0;
 	for (int i = 0; i < 4; i++)
 	{
@@ -358,7 +379,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     auto t1 = Clock::now();
 
     // identity the boundary particles after putting particles in cell
-
+	local_identify_boundary_cells();
 
 
     // apply force
