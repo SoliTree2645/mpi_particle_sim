@@ -24,6 +24,7 @@ static double y_max;
 // Local spatial cell information
 static std::vector<particle_t> local_particles;
 
+
 static std::vector<int> local_cell_counts; // num of particle in each cell
 static std::vector<int> local_cell_offsets; // prefix scan of local_cell_counts
 static std::vector<int> local_particle_indices; // indices of local particles
@@ -34,7 +35,8 @@ static int local_cells_per_height;
 static double local_cell_width;
 static double local_cell_height;
 
-int local_num_cells;
+static int local_num_cells;
+
 
 
 
@@ -102,9 +104,10 @@ int locate_cell(double px, double py)
 
 void local_put_particle_in_cell()
 {
+	int local_num_parts = static_cast<int>(local_particles.size());
 	// fill in local_cell_counts
 	std::fill(local_cell_counts.begin(), local_cell_counts.end(), 0);
-	int local_num_parts = local_particles.size();
+	
 
 	for (int i = 0; i < local_num_parts; i++)
 	{
@@ -173,11 +176,13 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 			
 		}
 	}
+	
 
-	int local_count = static_cast<int>(local_particles.size());
+
+	int local_num_parts = static_cast<int>(local_particles.size());
 	int total_count = 0;
 
-	MPI_Reduce(&local_count, &total_count, 1, 
+	MPI_Reduce(&local_num_parts, &total_count, 1, 
 			MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
 
 	if(rank == 0)
@@ -199,7 +204,7 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	local_cell_counts.resize(local_num_cells);
 	local_cell_offsets.resize(local_num_cells + 1);
 	local_cell_next.resize(local_num_cells);
-	local_particle_indices.resize(local_particles.size()); 
+	local_particle_indices.resize(local_num_parts); 
 
 	
 	
@@ -209,11 +214,14 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 }
 
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    local_put_particle_in_cell();
+	int local_num_parts = static_cast<int>(local_particles.size());
+
+    	local_put_particle_in_cell();
+
 
 
     // apply force
-    for (int i = 0; i < local_particles.size(); i++)
+    for (int i = 0; i < local_num_parts; i++)
     {
 	local_particles[i].ax = 0;
 	local_particles[i].ay = 0;
@@ -250,7 +258,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	}
     }
     //Move particles
-    for(int i = 0; i < local_particles.size(); i++)
+    for(int i = 0; i < local_num_parts; i++)
     {
 	    move(local_particles[i], size);
 	
@@ -262,8 +270,22 @@ void gather_for_save(particle_t* parts, int num_parts, double size, int rank, in
     // processor has an in-order view of all particles. That is, the array
     // parts is complete and sorted by particle id.
     //
-    for (int i = 0; i < local_particles.size(); i++)
+    int local_num_parts = static_cast<int>(local_particles.size());
+    int recvcounts[num_procs];
+
+    MPI_Gather(&local_num_parts, 1, MPI_INT, &recvcounts[0], 1, MPI_INT, 0, MPI_COMM_WORLD); 
+
+    int displs[num_procs];
+    displs[0] = 0;
+
+    for (int i = 0; i < num_procs - 1; i++)
     {
-	    parts[i] = local_particles[i];
+	    displs[i + 1] = displs[i] + recvcounts[i];
+	
     }
+
+    MPI_Gatherv(local_particles.data(), local_num_parts, PARTICLE, parts, recvcounts, displs, PARTICLE, 0, MPI_COMM_WORLD);
+
+
+
 }
