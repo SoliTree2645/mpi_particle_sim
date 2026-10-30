@@ -4,6 +4,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 // Put any static global variables here that you will use throughout the simulation.
 
@@ -23,14 +24,19 @@ static double y_max;
 
 // Local spatial cell information
 static std::vector<particle_t> local_particles;
-static std::vector<particle_t> boundary_particles;
-enum Direction {TOP = 0, TOP_RIGHT, RIGHT, BOTTOM_RIGHT, BOTTOM, BOTTOM_LEFT, LEFT, TOP_LEFT};
 
+// boundary and ghost
+enum Direction {TOP = 0, TOP_RIGHT, RIGHT, BOTTOM_RIGHT, BOTTOM, BOTTOM_LEFT, LEFT, TOP_LEFT};
 static int neighbors[8];
+
+static std::vector<particle_t> boundary_particles;
 static int boundary_counts[8];
 static int boundary_offsets[9];
 
 static std::vector<particle_t> ghost_particles;
+static int ghost_counts[8];
+static int ghost_offsets[9];
+
 
 
 static std::vector<int> local_cell_counts; // num of particle in each cell
@@ -48,6 +54,7 @@ static int local_num_cells;
 // Profiling
 using Clock = std::chrono::high_resolution_clock;
 static double local_put_particle_in_cell_time = 0.0;
+static double local_boundary_ghost_time = 0.0;
 static double local_force_time = 0.0;
 static double local_move_time = 0.0;
 static int step_count;
@@ -160,50 +167,75 @@ void local_put_particle_in_cell()
 	}
 }
 
-void check_neighbors()
+void neighbors_setup(int rank)
 {
-	// check four big directions first
-	// check if top is boundary
 	if(proc_row == proc_rows - 1)
 	{
-		neighbors[TOP] = 0;
+		neighbors[TOP] = MPI_PROC_NULL;
 	}else
 	{
-		neighbors[TOP] = 1;
+		neighbors[TOP] = rank + proc_cols;
 	}
 	
-	// check if right is boundary
+	
 	if(proc_col == proc_cols - 1)
 	{
-		neighbors[RIGHT] = 0;
+		neighbors[RIGHT] = MPI_PROC_NULL;
 	}else
 	{
-		neighbors[RIGHT] = 1;
+		neighbors[RIGHT] = rank + 1;
 	}
 
 	// check if bottom is boundary
 	if(proc_row == 0)
 	{
-		neighbors[BOTTOM] = 0;
+		neighbors[BOTTOM] = MPI_PROC_NULL;
 	}else
 	{
-		neighbors[BOTTOM] = 1;
+		neighbors[BOTTOM] = rank - proc_cols;
 	}
 
 	// check if left is boundary
 	if(proc_col == 0)
 	{
-		neighbors[LEFT] = 0;
+		neighbors[LEFT] = MPI_PROC_NULL;
 	}else
 	{
-		neighbors[LEFT] = 1;
+		neighbors[LEFT] = rank - 1;
 	}
 
-	if(!neighbors[TOP])
+	if(proc_row == proc_rows - 1 || proc_col == proc_cols - 1)
 	{
-		neighbors[TOP_RIGHT] = 0;
-		neighbors[TOP_LEFT] = 0;
+		neighbors[TOP_RIGHT] = MPI_PROC_NULL;
+	}else
+	{
+		neighbors[TOP_RIGHT] = neighbors[TOP] + 1;
 	}
+
+	if(proc_row == 0 || proc_col == proc_cols - 1)
+	{
+		neighbors[BOTTOM_RIGHT] = MPI_PROC_NULL;
+	}else
+	{
+		neighbors[BOTTOM_RIGHT] = neighbors[BOTTOM] + 1;
+	}
+
+	if(proc_row == 0 || proc_col == 0)
+	{
+		neighbors[BOTTOM_LEFT] = MPI_PROC_NULL;
+	}else
+	{
+		neighbors[BOTTOM_LEFT] = neighbors[BOTTOM] - 1;
+	}
+
+	if(proc_row == proc_rows - 1 || proc_col == 0)
+	{
+		neighbors[TOP_LEFT] = MPI_PROC_NULL;
+	}else
+	{
+		neighbors[TOP_LEFT] = neighbors[TOP] - 1;
+	}
+
 }
 
 
@@ -231,7 +263,7 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	y_max = domain_height * (proc_row + 1);
 	
 	
-	check_neighbors();
+	neighbors_setup(rank);
 	
 
 
@@ -262,7 +294,7 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	}
 
 	//Initialize the CSR local spatial cell representation
-        local_cells_per_width = std::max(1, static_cast<int>(domain_width / cutoff));
+    local_cells_per_width = std::max(1, static_cast<int>(domain_width / cutoff));
 	local_cells_per_height = std::max(1, static_cast<int>(domain_height / cutoff));
 	local_cell_width = domain_width / local_cells_per_width;
 	local_cell_height = domain_height / local_cells_per_height;
@@ -284,7 +316,7 @@ void local_identify_boundary_cells()
 	boundary_particles.clear();
 	// top
 	int top_bd_count = 0;
-	if(is_boundary[0])
+	if(neighbors[TOP] != MPI_PROC_NULL)
 	{
 		for(int i = 0; i < local_cells_per_width; i++)
 		{
@@ -302,9 +334,23 @@ void local_identify_boundary_cells()
 		}
 	}
 
+	int top_right_bd_count = 0;
+	if(neighbors[TOP_RIGHT] != MPI_PROC_NULL)
+	{
+		int cell = local_num_cells - 1;
+		int begin = local_cell_offsets[cell];
+		int end = local_cell_offsets[cell + 1];
+		for(int k = begin; k < end; k++)
+		{
+			int j = local_particle_indices[k];
+			boundary_particles.push_back(local_particles[j]);
+			top_right_bd_count += 1;
+		}
+	}
+
 	// right
 	int right_bd_count = 0;
-	if(is_boundary[1])
+	if(neighbors[RIGHT] != MPI_PROC_NULL)
 	{
 		for(int i = 0; i < local_cells_per_height; i++)
 		{
@@ -320,10 +366,24 @@ void local_identify_boundary_cells()
 		}
 	}
 
+	int bottom_right_bd_count = 0;
+	if(neighbors[BOTTOM_RIGHT] != MPI_PROC_NULL)
+	{
+		int cell = local_cells_per_width - 1;
+		int begin = local_cell_offsets[cell];
+		int end = local_cell_offsets[cell + 1];
+		for(int k = begin; k < end; k++)
+		{
+			int j = local_particle_indices[k];
+			boundary_particles.push_back(local_particles[j]);
+			bottom_right_bd_count += 1;
+		}
+	}
+
 
 	// bottom
 	int bottom_bd_count = 0;
-	if(is_boundary[2])
+	if(neighbors[BOTTOM] != MPI_PROC_NULL)
 	{
 		for(int cell = 0; cell < local_cells_per_width; cell++)
 		{
@@ -338,9 +398,22 @@ void local_identify_boundary_cells()
 		}
 	}
 
+	int bottom_left_bd_count = 0;
+	if(neighbors[BOTTOM_LEFT] != MPI_PROC_NULL)
+	{
+		int begin = local_cell_offsets[0];
+		int end = local_cell_offsets[1];
+		for(int k = begin; k < end; k++)
+		{
+			int j = local_particle_indices[k];
+			boundary_particles.push_back(local_particles[j]);
+			bottom_left_bd_count += 1;
+		}
+	}
+
 	// left
 	int left_bd_count = 0;
-	if (is_boundary[3])
+	if (neighbors[LEFT] != MPI_PROC_NULL)
 	{
 		for(int i = 0; i < local_cells_per_height; i++)
 		{
@@ -357,12 +430,36 @@ void local_identify_boundary_cells()
 		}
 	}
 
-	int bd_counts[4] = {top_bd_count, right_bd_count, bottom_bd_count, left_bd_count};
-	
-	local_boundary_offsets[0] = 0;
-	for (int i = 0; i < 4; i++)
+	int top_left_bd_count = 0;
+	if(neighbors[TOP_LEFT] != MPI_PROC_NULL)
 	{
-		local_boundary_offsets[i + 1] = local_boundary_offsets[i] + bd_counts[i]; 
+		int cell = local_num_cells - local_cells_per_width;
+		int begin = local_cell_offsets[cell];
+		int end = local_cell_offsets[cell + 1];
+		for(int k = begin; k < end; k++)
+		{
+			int j = local_particle_indices[k];
+			boundary_particles.push_back(local_particles[j]);
+			top_left_bd_count += 1;
+		}
+	}
+
+
+	boundary_counts[TOP] = top_bd_count;
+	boundary_counts[TOP_RIGHT] = top_right_bd_count;
+	boundary_counts[RIGHT] = right_bd_count;
+	boundary_counts[BOTTOM_RIGHT] = bottom_right_bd_count;
+	boundary_counts[BOTTOM] = bottom_bd_count;
+	boundary_counts[BOTTOM_LEFT] = bottom_left_bd_count;
+	boundary_counts[LEFT] = left_bd_count;
+	boundary_counts[TOP_LEFT] = top_left_bd_count;
+	
+	
+	
+	boundary_offsets[0] = 0;
+	for (int i = 0; i < 8; i++)
+	{
+		boundary_offsets[i + 1] = boundary_offsets[i] + boundary_counts[i]; 
 	}
 	
 	
@@ -374,12 +471,103 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	
     auto t0 = Clock::now();
     local_put_particle_in_cell();
-
+	
 
     auto t1 = Clock::now();
 
     // identity the boundary particles after putting particles in cell
 	local_identify_boundary_cells();
+	assert(boundary_offsets[8] == static_cast<int>(boundary_particles.size()));
+	for(int d = 0; d < 8; d++)
+	{
+		assert(boundary_offsets[d + 1] - boundary_offsets[d] == boundary_counts[d]);
+	}
+
+	// exchange boundary and find ghosts
+	std::fill(ghost_counts, ghost_counts + 8, 0);
+	const int GHOST_COUNT_TAG = 100;
+	MPI_Request count_requests[16];
+	int cnt_req_num = 0;
+
+	for(int d = 0; d < 8; d++)
+	{
+		if(neighbors[d] != MPI_PROC_NULL)
+		{
+			MPI_Irecv(
+				&ghost_counts[d], 
+				1, 
+				MPI_INT, 
+				neighbors[d], 
+				GHOST_COUNT_TAG,
+				MPI_COMM_WORLD,
+				&count_requests[cnt_req_num++]
+			);
+		}
+	}
+
+	for(int d = 0; d < 8; d++)
+	{
+		if(neighbors[d] != MPI_PROC_NULL)
+		{
+			MPI_Isend(&boundary_counts[d], 
+				1, 
+				MPI_INT, 
+				neighbors[d], 
+				GHOST_COUNT_TAG, 
+				MPI_COMM_WORLD, 
+				&count_requests[cnt_req_num++]
+			);
+		}
+	}
+	MPI_Waitall(cnt_req_num, count_requests, MPI_STATUSES_IGNORE);
+
+	ghost_offsets[0] = 0;
+	for(int i = 0; i < 8; i++)
+	{
+		ghost_offsets[i + 1] = ghost_offsets[i] + ghost_counts[i];
+	}
+	ghost_particles.resize(ghost_offsets[8]);
+	assert(ghost_offsets[8] == static_cast<int>(ghost_particles.size()));
+
+	const int GHOST_DATA_TAG = 200;
+	MPI_Request data_requests[16];
+	int data_req_num = 0;
+
+	for(int d = 0; d < 8; d++)
+	{
+		if(neighbors[d] != MPI_PROC_NULL)
+		{
+			particle_t* recv_ptr = ghost_counts[d] > 0 ? ghost_particles.data() + ghost_offsets[d] : nullptr;
+			MPI_Irecv(recv_ptr, 
+				ghost_counts[d], 
+				PARTICLE, 
+				neighbors[d], 
+				GHOST_DATA_TAG, 
+				MPI_COMM_WORLD, 
+				&data_requests[data_req_num++]
+			);
+		}
+	}
+	
+	for(int d = 0; d < 8; d++)
+	{
+		if(neighbors[d] != MPI_PROC_NULL)
+		{
+			particle_t* send_ptr = boundary_counts[d] > 0 ? boundary_particles.data() + boundary_offsets[d] : nullptr;
+			MPI_Isend(send_ptr, 
+				boundary_counts[d], 
+				PARTICLE, 
+				neighbors[d], 
+				GHOST_DATA_TAG, 
+				MPI_COMM_WORLD, 
+				&data_requests[data_req_num++]
+			);
+		}
+	}
+
+	MPI_Waitall(data_req_num, data_requests, MPI_STATUSES_IGNORE);
+
+	auto t2 = Clock::now();
 
 
     // apply force
@@ -418,7 +606,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 		}
 	}
     }
-    auto t2 = Clock::now();
+    auto t3 = Clock::now();
 
     
     //Move particles
@@ -428,18 +616,20 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	
     }
 
-    auto t3 = Clock::now();
+    auto t4 = Clock::now();
     step_count += 1;
 
     local_put_particle_in_cell_time += std::chrono::duration<double>(t1 - t0).count();
-    local_force_time += std::chrono::duration<double>(t2 - t1).count();
-    local_move_time += std::chrono::duration<double>(t3 - t2).count();
+	local_boundary_ghost_time += std::chrono::duration<double>(t2 - t1).count();
+    local_force_time += std::chrono::duration<double>(t3 - t2).count();
+    local_move_time += std::chrono::duration<double>(t4 - t3).count();
 
     if(rank == 0)
     {
 	    if(step_count == nsteps)
 	    {
 		    std::cout << "Put particle in local cell time: " << local_put_particle_in_cell_time << std::endl;
+			std::cout << "Local boundary and ghost time: " << local_boundary_ghost_time << std::endl;
 		    std::cout << "Local force time: " << local_force_time << std::endl;
 		    std::cout << "local move time: " << local_move_time << std::endl;
 	    }
