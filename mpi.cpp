@@ -25,7 +25,20 @@ static double y_max;
 // Local spatial cell information
 static std::vector<particle_t> local_particles;
 
-// boundary and ghost
+static std::vector<int> local_cell_counts; // num of particle in each cell
+static std::vector<int> local_cell_offsets; // prefix scan of local_cell_counts
+static std::vector<int> local_particle_indices; // indices of local particles
+static std::vector<int> local_cell_next; // index of putting next particle for each local cell
+
+static int local_cells_per_width;
+static int local_cells_per_height;
+static double local_cell_width;
+static double local_cell_height;
+
+static int local_num_cells;
+
+
+// boundary, ghost, and migration
 enum Direction {TOP = 0, TOP_RIGHT, RIGHT, BOTTOM_RIGHT, BOTTOM, BOTTOM_LEFT, LEFT, TOP_LEFT};
 static int neighbors[8];
 
@@ -43,20 +56,8 @@ static int migrate_send_offsets[9];
 
 static std::vector<particle_t> migrate_recv_particles;
 static int migrate_recv_counts[8];
-static int migrate_recv_counts[9];
+static int migrate_recv_offsets[9];
 
-
-static std::vector<int> local_cell_counts; // num of particle in each cell
-static std::vector<int> local_cell_offsets; // prefix scan of local_cell_counts
-static std::vector<int> local_particle_indices; // indices of local particles
-static std::vector<int> local_cell_next; // index of putting next particle for each local cell
-
-static int local_cells_per_width;
-static int local_cells_per_height;
-static double local_cell_width;
-static double local_cell_height;
-
-static int local_num_cells;
 
 // Profiling
 using Clock = std::chrono::high_resolution_clock;
@@ -641,7 +642,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
     
     //Move particles
 	migrate_send_particles.clear();
-	migrate_send_counts[8] = {0};
+	std::fill(migrate_send_counts, migrate_send_counts + 8, 0);
     for(int i = 0; i < local_particles.size(); i++)
     {
 	    move(local_particles[i], size);
@@ -682,9 +683,115 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 		}else
 		{
 			int direction = find_neighbor_direction(dst);
+			assert(direction != -1);
 			migrate_send_particles[migrate_send_dir_next[direction]++] = p;
 		}
 	}
+
+	assert(static_cast<int>(local_particles.size()) == static_cast<int>(staying_particles.size()) + migrate_send_offsets[8]);
+
+
+	std::fill(migrate_recv_counts, migrate_recv_counts + 8, 0);
+	const int MIGRATE_COUNT_TAG = 300;
+	MPI_Request mig_cnt_requests[16];
+	int mig_cnt_req_num = 0;
+
+	for (int d = 0; d < 8; d++)
+	{
+		if(neighbors[d] != MPI_PROC_NULL)
+		{
+			MPI_Irecv(&migrate_recv_counts[d], 
+				1, 
+				MPI_INT, 
+				neighbors[d], 
+				MIGRATE_COUNT_TAG, 
+				MPI_COMM_WORLD, 
+				&mig_cnt_requests[mig_cnt_req_num++]
+			);
+		}
+	}
+
+	for(int d = 0; d < 8; d++)
+	{
+		if(neighbors[d] != MPI_PROC_NULL)
+		{
+			MPI_Isend(&migrate_send_counts[d], 
+				1, 
+				MPI_INT, 
+				neighbors[d], 
+				MIGRATE_COUNT_TAG, 
+				MPI_COMM_WORLD, 
+				&mig_cnt_requests[mig_cnt_req_num++]
+			);
+		}
+	}
+
+	MPI_Waitall(mig_cnt_req_num, mig_cnt_requests, MPI_STATUSES_IGNORE);
+
+	
+	migrate_recv_offsets[0] = 0;
+	for(int i = 0; i < 8; i++)
+	{
+		migrate_recv_offsets[i + 1] = migrate_recv_offsets[i] + migrate_recv_counts[i];
+	}
+	migrate_recv_particles.resize(migrate_recv_offsets[8]);
+	assert(migrate_recv_offsets[8] == static_cast<int>(migrate_recv_particles.size()));
+
+
+	const int MIG_DATA_TAG = 400;
+	MPI_Request mig_data_requests[16];
+	int mig_data_req_num = 0;
+
+	for(int d = 0; d < 8; d++)
+	{
+		if(neighbors[d] != MPI_PROC_NULL)
+		{
+			particle_t* recv_ptr = migrate_recv_counts[d] > 0 ? migrate_recv_particles.data() + migrate_recv_offsets[d] : nullptr;
+			MPI_Irecv(recv_ptr, 
+				migrate_recv_counts[d], 
+				PARTICLE, 
+				neighbors[d], 
+				MIG_DATA_TAG, 
+				MPI_COMM_WORLD, 
+				&mig_data_requests[mig_data_req_num++]
+			);
+		}
+
+	}
+
+
+	for(int d = 0; d < 8;  d++)
+	{
+		if(neighbors[d] != MPI_PROC_NULL)
+		{
+			particle_t* send_ptr = migrate_send_counts[d] > 0 ? migrate_send_particles.data() + migrate_send_offsets[d] : nullptr; 
+			MPI_Isend(send_ptr, 
+				migrate_send_counts[d], 
+				PARTICLE, 
+				neighbors[d], 
+				MIG_DATA_TAG, 
+				MPI_COMM_WORLD, 
+				&mig_data_requests[mig_data_req_num++]
+			);
+		}
+	}
+
+	MPI_Waitall(mig_data_req_num, mig_data_requests, MPI_STATUSES_IGNORE);
+
+	staying_particles.insert(staying_particles.end(), migrate_recv_particles.begin(), migrate_recv_particles.end());
+	local_particles.swap(staying_particles);
+
+	for(const particle_t& p : local_particles)
+	{
+		assert(owner_rank(p) == rank);
+	}
+
+	int local_count = local_particles.size();
+	int global_count = 0;
+
+	MPI_Allreduce(&local_count, &global_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+	assert(global_count == num_parts);
+
 
 
 
