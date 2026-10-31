@@ -509,6 +509,33 @@ int find_neighbor_direction(int dst)
 	return -1;
 }
 
+bool near_boundary_direction(const particle_t& p, int dir)
+{
+	switch (dir)
+	{
+		case TOP:
+			return y_max - p.y <= cutoff;
+		case TOP_RIGHT:
+			return y_max - p.y <= cutoff && x_max - p.x <= cutoff;
+		case RIGHT:
+			return x_max - p.x <= cutoff;
+		case BOTTOM_RIGHT:
+			return x_max - p.x <= cutoff && p.y - y_min <= cutoff;
+		case BOTTOM:
+			return p.y - y_min <= cutoff;
+		case BOTTOM_LEFT:
+			return p.y - y_min <= cutoff && p.x - x_min <= cutoff;
+		case LEFT:
+			return p.x - x_min <= cutoff;
+		case TOP_LEFT:
+			return p.x - x_min <= cutoff && y_max - p.y <= cutoff;
+	
+	
+	}
+	
+	return false;
+}
+
 void get_max_phase_time()
 {
 	MPI_Reduce(&local_put_particle_in_cell_time, &max_local_put_particle_in_cell_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
@@ -682,9 +709,26 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	// apply ghost force
 	for (int i = 0; i < local_particles.size(); i++)
 	{
-		for(int g = 0; g < static_cast<int>(ghost_particles.size()); g++)
+		particle_t& p = local_particles[i];
+
+		for(int d = 0; d < 8; d++)
 		{
-			apply_force(local_particles[i], ghost_particles[g]);
+			if(neighbors[d] == MPI_PROC_NULL)
+			{
+				continue;
+			}
+
+			if(!near_boundary_direction(p, d))
+			{
+				continue;
+			}
+
+			for(int g = ghost_offsets[d]; g < ghost_offsets[d + 1]; g++)
+			{
+				apply_force(p, ghost_particles[g]);
+			}
+
+
 		}
 	}
 
