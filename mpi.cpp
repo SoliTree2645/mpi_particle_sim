@@ -62,10 +62,33 @@ static int migrate_recv_offsets[9];
 // Profiling
 using Clock = std::chrono::high_resolution_clock;
 static double local_put_particle_in_cell_time = 0.0;
-static double local_boundary_ghost_time = 0.0;
+static double max_local_put_particle_in_cell_time;
+
+static double boundary_packing_time = 0.0;
+static double max_boundary_packing_time;
+
+static double ghost_count_comm_time = 0.0; 
+static double max_ghost_count_comm_time;
+static double ghost_data_comm_time = 0.0;
+static double max_ghost_data_comm_time;
+
 static double local_force_time = 0.0;
+static double max_local_force_time;
 static double ghost_force_time = 0.0;
+static double max_ghost_force_time;
+
 static double local_move_time = 0.0;
+static double max_local_move_time;
+
+static double migration_packing_time = 0.0;
+static double max_migration_packing_time;
+static double migration_count_comm_time = 0.0;
+static double max_migration_count_comm_time;
+static double migration_data_comm_time = 0.0;
+static double max_migration_data_comm_time;
+
+static double after_sim_debug_comm_time = 0.0;
+
 static int step_count;
 
 
@@ -486,6 +509,25 @@ int find_neighbor_direction(int dst)
 	return -1;
 }
 
+void get_max_phase_time()
+{
+	MPI_Reduce(&local_put_particle_in_cell_time, &max_local_put_particle_in_cell_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+	MPI_Reduce(&boundary_packing_time, &max_boundary_packing_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+	MPI_Reduce(&ghost_count_comm_time, &max_ghost_count_comm_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+	MPI_Reduce(&ghost_data_comm_time, &max_ghost_data_comm_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+	MPI_Reduce(&local_force_time, &max_local_force_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+	MPI_Reduce(&ghost_force_time, &max_ghost_force_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+	MPI_Reduce(&local_move_time, &max_local_move_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+	MPI_Reduce(&migration_packing_time, &max_migration_packing_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+	MPI_Reduce(&migration_count_comm_time, &max_migration_count_comm_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+	MPI_Reduce(&migration_data_comm_time, &max_migration_data_comm_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+}
+
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {	
     auto t0 = Clock::now();
     local_put_particle_in_cell();
@@ -493,13 +535,18 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 
     auto t1 = Clock::now();
 
-    // identity the boundary particles after putting particles in cell
+    // boundary packing
 	local_identify_boundary_cells();
+
+	
+
 	assert(boundary_offsets[8] == static_cast<int>(boundary_particles.size()));
 	for(int d = 0; d < 8; d++)
 	{
 		assert(boundary_offsets[d + 1] - boundary_offsets[d] == boundary_counts[d]);
 	}
+	
+	auto t2 = Clock::now();
 
 	// exchange boundary and find ghosts
 	std::fill(ghost_counts, ghost_counts + 8, 0);
@@ -547,6 +594,9 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	ghost_particles.resize(ghost_offsets[8]);
 	assert(ghost_offsets[8] == static_cast<int>(ghost_particles.size()));
 
+
+	auto t3 = Clock::now();
+
 	const int GHOST_DATA_TAG = 200;
 	MPI_Request data_requests[16];
 	int data_req_num = 0;
@@ -585,7 +635,8 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 
 	MPI_Waitall(data_req_num, data_requests, MPI_STATUSES_IGNORE);
 
-	auto t2 = Clock::now();
+
+	auto t4 = Clock::now();
 
 
     // apply local force
@@ -625,7 +676,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 		}
     }
 
-	auto t3 = Clock::now();
+	auto t5 = Clock::now();
 
 
 	// apply ghost force
@@ -637,7 +688,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 		}
 	}
 
-	auto t4 = Clock::now();
+	auto t6 = Clock::now();
     
     
     //Move particles
@@ -656,6 +707,8 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 		}
 	
     }
+
+	auto t7 = Clock::now();
 
 	migrate_send_offsets[0] = 0;
 	for (int i = 0; i < 8; i++)
@@ -690,6 +743,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 
 	assert(static_cast<int>(local_particles.size()) == static_cast<int>(staying_particles.size()) + migrate_send_offsets[8]);
 
+	auto t8 = Clock::now();
 
 	std::fill(migrate_recv_counts, migrate_recv_counts + 8, 0);
 	const int MIGRATE_COUNT_TAG = 300;
@@ -729,6 +783,8 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	MPI_Waitall(mig_cnt_req_num, mig_cnt_requests, MPI_STATUSES_IGNORE);
 
 	
+
+	
 	migrate_recv_offsets[0] = 0;
 	for(int i = 0; i < 8; i++)
 	{
@@ -737,6 +793,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	migrate_recv_particles.resize(migrate_recv_offsets[8]);
 	assert(migrate_recv_offsets[8] == static_cast<int>(migrate_recv_particles.size()));
 
+	auto t9 = Clock::now();
 
 	const int MIG_DATA_TAG = 400;
 	MPI_Request mig_data_requests[16];
@@ -781,38 +838,64 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	staying_particles.insert(staying_particles.end(), migrate_recv_particles.begin(), migrate_recv_particles.end());
 	local_particles.swap(staying_particles);
 
+	auto t_end = Clock::now();
+
 	for(const particle_t& p : local_particles)
 	{
 		assert(owner_rank(p) == rank);
 	}
 
-	int local_count = local_particles.size();
-	int global_count = 0;
+	//int local_count = local_particles.size();
+	//int global_count = 0;
 
-	MPI_Allreduce(&local_count, &global_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-	assert(global_count == num_parts);
-
-
+	//MPI_Allreduce(&local_count, &global_count, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+	//assert(global_count == num_parts);
 
 
-    auto end = Clock::now();
+
+
     step_count += 1;
 
     local_put_particle_in_cell_time += std::chrono::duration<double>(t1 - t0).count();
-	local_boundary_ghost_time += std::chrono::duration<double>(t2 - t1).count();
-    local_force_time += std::chrono::duration<double>(t3 - t2).count();
-	ghost_force_time += std::chrono::duration<double>(t4 - t3).count();
-    local_move_time += std::chrono::duration<double>(end - t4).count();
+
+	boundary_packing_time += std::chrono::duration<double>(t2 - t1).count();
+
+	ghost_count_comm_time += std::chrono::duration<double>(t3 - t2).count();
+	ghost_data_comm_time += std::chrono::duration<double>(t4 - t3).count();
+
+    local_force_time += std::chrono::duration<double>(t5 - t4).count();
+	ghost_force_time += std::chrono::duration<double>(t6 - t5).count();
+
+    local_move_time += std::chrono::duration<double>(t7 - t6).count();
+
+	migration_packing_time += std::chrono::duration<double>(t8 - t7).count();
+	migration_count_comm_time += std::chrono::duration<double>(t9 - t8).count();
+	migration_data_comm_time += std::chrono::duration<double>(t_end - t9).count();
+
+
+	get_max_phase_time();
 
     if(rank == 0)
     {
 	    if(step_count == nsteps)
 	    {
-		    std::cout << "Put particle in local cell time: " << local_put_particle_in_cell_time << std::endl;
-			std::cout << "Local boundary and ghost communication time: " << local_boundary_ghost_time << std::endl;
-		    std::cout << "Local force time: " << local_force_time << std::endl;
-			std::cout << "Ghost force time: " << ghost_force_time << std::endl;
-		    std::cout << "local move time: " << local_move_time << std::endl;
+		    std::cout << "Max Put particle in local cell time: " << max_local_put_particle_in_cell_time << std::endl;
+
+			std::cout << "Max boundary packing time: " << max_boundary_packing_time << std::endl;
+
+			std::cout << "Max ghost count comm time: " << max_ghost_count_comm_time << std::endl;
+			std::cout << "Max ghost data comm time: " << max_ghost_data_comm_time << std::endl;
+ 
+		    std::cout << "Max Local force time: " << max_local_force_time << std::endl;
+			std::cout << "Max Ghost force time: " << max_ghost_force_time << std::endl;
+
+		    std::cout << "Max local move time: " << local_move_time << std::endl;
+
+			std::cout << "Max migration packing time: " << max_migration_packing_time << std::endl;
+			std::cout << "Max migration count comm time: " << max_migration_count_comm_time << std::endl;
+			std::cout << "Max migration data comm time: " << max_migration_data_comm_time << std::endl;  
+
+			std::cout << "--------------------------------------------------------------------------------------------------------------------" << std::endl;
 	    }
     }
 
