@@ -37,6 +37,13 @@ static std::vector<particle_t> ghost_particles;
 static int ghost_counts[8];
 static int ghost_offsets[9];
 
+static std::vector<particle_t> migrate_send_particles;
+static int migrate_send_counts[8];
+static int migrate_send_offsets[9]; 
+
+static std::vector<particle_t> migrate_recv_particles;
+static int migrate_recv_counts[8];
+static int migrate_recv_counts[9];
 
 
 static std::vector<int> local_cell_counts; // num of particle in each cell
@@ -56,6 +63,7 @@ using Clock = std::chrono::high_resolution_clock;
 static double local_put_particle_in_cell_time = 0.0;
 static double local_boundary_ghost_time = 0.0;
 static double local_force_time = 0.0;
+static double ghost_force_time = 0.0;
 static double local_move_time = 0.0;
 static int step_count;
 
@@ -130,12 +138,11 @@ void local_put_particle_in_cell()
 {
 	local_particle_indices.resize(local_particles.size());
 
-	int local_num_parts = static_cast<int>(local_particles.size());
 	// fill in local_cell_counts
 	std::fill(local_cell_counts.begin(), local_cell_counts.end(), 0);
 	
 
-	for (int i = 0; i < local_num_parts; i++)
+	for (int i = 0; i < local_particles.size(); i++)
 	{
 		int cell = locate_local_cell(local_particles[i].x, local_particles[i].y);
 
@@ -156,7 +163,7 @@ void local_put_particle_in_cell()
 	}
 
 	// put particle indices in local cell
-	for (int i = 0; i < local_num_parts; i++)
+	for (int i = 0; i < local_particles.size(); i++)
 	{
 		int cell = locate_local_cell(local_particles[i].x, local_particles[i].y);
 
@@ -304,7 +311,7 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	local_cell_counts.resize(local_num_cells);
 	local_cell_offsets.resize(local_num_cells + 1);
 	local_cell_next.resize(local_num_cells);
-	local_particle_indices.resize(local_num_parts); 
+	local_particle_indices.resize(local_particles.size()); 
 
 
 
@@ -465,10 +472,20 @@ void local_identify_boundary_cells()
 	
 }
 
-void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
+int find_neighbor_direction(int dst)
+{
+	for(int d = 0; d < 8; d++)
+	{
+		if(dst == neighbors[d])
+		{
+			return d;
+		}
+	}
 
-    int local_num_parts = static_cast<int>(local_particles.size());
-	
+	return -1;
+}
+
+void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {	
     auto t0 = Clock::now();
     local_put_particle_in_cell();
 	
@@ -570,67 +587,124 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	auto t2 = Clock::now();
 
 
-    // apply force
+    // apply local force
     
-    for (int i = 0; i < local_num_parts; i++)
+    for (int i = 0; i < local_particles.size(); i++)
     {
-	local_particles[i].ax = 0;
-	local_particles[i].ay = 0;
+		local_particles[i].ax = 0;
+		local_particles[i].ay = 0;
 
-	int cell = locate_local_cell(local_particles[i].x, local_particles[i].y);
-	int cell_col = cell % local_cells_per_width;
-	int cell_row = cell / local_cells_per_width;
-	
-	for (int da = -1; da <= 1; da++)
-	{
-		for (int db = -1; db <= 1; db++)
+		int cell = locate_local_cell(local_particles[i].x, local_particles[i].y);
+		int cell_col = cell % local_cells_per_width;
+		int cell_row = cell / local_cells_per_width;
+		
+		for (int da = -1; da <= 1; da++)
 		{
-			int neighbor_cell_col = cell_col + da;
-			int neighbor_cell_row = cell_row + db;
-
-			if(neighbor_cell_col < 0 || neighbor_cell_col >= local_cells_per_width ||
-					neighbor_cell_row < 0 || neighbor_cell_row >= local_cells_per_height)
+			for (int db = -1; db <= 1; db++)
 			{
-				continue;
-			}
-			int neighbor_cell = neighbor_cell_col + neighbor_cell_row * local_cells_per_width;
+				int neighbor_cell_col = cell_col + da;
+				int neighbor_cell_row = cell_row + db;
 
-			int begin = local_cell_offsets[neighbor_cell];
-			int end = local_cell_offsets[neighbor_cell + 1];
+				if(neighbor_cell_col < 0 || neighbor_cell_col >= local_cells_per_width ||
+						neighbor_cell_row < 0 || neighbor_cell_row >= local_cells_per_height)
+				{
+					continue;
+				}
+				int neighbor_cell = neighbor_cell_col + neighbor_cell_row * local_cells_per_width;
 
-			for (int k = begin; k < end; k++)
-			{
-				int j = local_particle_indices[k];
-				apply_force(local_particles[i], local_particles[j]);
+				int begin = local_cell_offsets[neighbor_cell];
+				int end = local_cell_offsets[neighbor_cell + 1];
+
+				for (int k = begin; k < end; k++)
+				{
+					int j = local_particle_indices[k];
+					apply_force(local_particles[i], local_particles[j]);
+				}
 			}
 		}
-	}
     }
-    auto t3 = Clock::now();
 
+	auto t3 = Clock::now();
+
+
+	// apply ghost force
+	for (int i = 0; i < local_particles.size(); i++)
+	{
+		for(int g = 0; g < static_cast<int>(ghost_particles.size()); g++)
+		{
+			apply_force(local_particles[i], ghost_particles[g]);
+		}
+	}
+
+	auto t4 = Clock::now();
+    
     
     //Move particles
-    for(int i = 0; i < local_num_parts; i++)
+	migrate_send_particles.clear();
+	migrate_send_counts[8] = {0};
+    for(int i = 0; i < local_particles.size(); i++)
     {
 	    move(local_particles[i], size);
+
+		int dst_rank = owner_rank(local_particles[i]);
+		if(dst_rank != rank)
+		{
+			int direction = find_neighbor_direction(dst_rank);
+			assert(direction != -1);
+			migrate_send_counts[direction] += 1;
+		}
 	
     }
 
-    auto t4 = Clock::now();
+	migrate_send_offsets[0] = 0;
+	for (int i = 0; i < 8; i++)
+	{
+		migrate_send_offsets[i + 1] = migrate_send_offsets[i] + migrate_send_counts[i];
+	}
+	migrate_send_particles.resize(migrate_send_offsets[8]);
+
+
+	std::vector<particle_t> staying_particles;
+	staying_particles.reserve(local_particles.size());
+
+	int migrate_send_dir_next[8];
+	for(int i = 0; i < 8; i++)
+	{
+		migrate_send_dir_next[i] = migrate_send_offsets[i];
+	}
+
+	for(const particle_t& p: local_particles)
+	{
+		int dst = owner_rank(p);
+		if(dst == rank)
+		{
+			staying_particles.push_back(p);
+		}else
+		{
+			int direction = find_neighbor_direction(dst);
+			migrate_send_particles[migrate_send_dir_next[direction]++] = p;
+		}
+	}
+
+
+
+    auto end = Clock::now();
     step_count += 1;
 
     local_put_particle_in_cell_time += std::chrono::duration<double>(t1 - t0).count();
 	local_boundary_ghost_time += std::chrono::duration<double>(t2 - t1).count();
     local_force_time += std::chrono::duration<double>(t3 - t2).count();
-    local_move_time += std::chrono::duration<double>(t4 - t3).count();
+	ghost_force_time += std::chrono::duration<double>(t4 - t3).count();
+    local_move_time += std::chrono::duration<double>(end - t4).count();
 
     if(rank == 0)
     {
 	    if(step_count == nsteps)
 	    {
 		    std::cout << "Put particle in local cell time: " << local_put_particle_in_cell_time << std::endl;
-			std::cout << "Local boundary and ghost time: " << local_boundary_ghost_time << std::endl;
+			std::cout << "Local boundary and ghost communication time: " << local_boundary_ghost_time << std::endl;
 		    std::cout << "Local force time: " << local_force_time << std::endl;
+			std::cout << "Ghost force time: " << ghost_force_time << std::endl;
 		    std::cout << "local move time: " << local_move_time << std::endl;
 	    }
     }
@@ -647,7 +721,7 @@ void gather_for_save(particle_t* parts, int num_parts, double size, int rank, in
     int recvcounts[num_procs];
 
     MPI_Gather(
-	            &local_num_parts, 
+	        &local_num_parts, 
 		    1, 
 		    MPI_INT, 
 		    rank == 0 ? &recvcounts[0] : nullptr, 
